@@ -32,6 +32,7 @@ const (
 	electionTimeoutMin   time.Duration = 250 * time.Millisecond
 	electionTimeoutMax   time.Duration = 400 * time.Millisecond
 	electionTimeoutRange time.Duration = 150 * time.Millisecond
+	replicationInterval  time.Duration = 200 * time.Millisecond
 )
 
 const (
@@ -101,7 +102,7 @@ func (rf *Raft) becomeFollowerLocked(term int) {
 		return
 	}
 
-	LOG(rf.me, rf.currentTerm, DLog, "%s->Follower, For T%s->T%s", rf.role, rf.currentTerm, term)
+	LOG(rf.me, rf.currentTerm, DLog, "%s->Follower, For T%d->T%d", rf.role, rf.currentTerm, term)
 	if term > rf.currentTerm {
 		rf.votedFor = VotedForNone
 	}
@@ -135,10 +136,10 @@ func (rf *Raft) becomeLeaderLocked() {
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 
-	var term int
-	var isleader bool
 	// Your code here (PartA).
-	return term, isleader
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.currentTerm, rf.role == Leader
 }
 
 // save Raft's persistent state to stable storage,
@@ -311,47 +312,97 @@ func (rf *Raft) contextLostLocked(role Role, term int) bool {
 	return !(rf.currentTerm == term && rf.role == role)
 }
 
+type AppendEntriesArgs struct {
+	Term     int
+	LeaderId int
+}
+
+type AppendEntriesReply struct {
+	Term    int
+	Success bool
+}
+
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
+
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	// align the term
+	if args.Term < rf.currentTerm {
+		LOG(rf.me, rf.currentTerm, DLog2, "<- S%d, Reject log, Higher term, T%d<T%d", args.LeaderId, args.Term, rf.currentTerm)
+		return
+	} else {
+		rf.becomeFollowerLocked(args.Term)
+	}
+
+	rf.resetElectionTimerLocked()
+}
+
+func (rf *Raft) startReplication(term int) bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if rf.contextLostLocked(Leader, term) {
+		LOG(rf.me, rf.currentTerm, DLog, "Lost Leader[%d] to %s[T%d]", term, rf.role, rf.currentTerm)
+		return false
+	}
+
+	for peer := 0; peer < len(rf.peers); peer++ {
+		if peer == rf.me {
+			continue
+		}
+
+		args := &AppendEntriesArgs{
+			Term:     rf.currentTerm,
+			LeaderId: rf.me,
+		}
+
+		// replicate to peer
+		go func(peer int, args *AppendEntriesArgs) {
+			reply := &AppendEntriesReply{}
+			ok := rf.sendAppendEntries(peer, args, reply)
+
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+			if !ok {
+				LOG(rf.me, rf.currentTerm, DLog, "-> S%d, Lost or crashed", peer)
+				return
+			}
+
+			// align the term
+			if reply.Term > rf.currentTerm {
+				rf.becomeFollowerLocked(reply.Term)
+				return
+			}
+
+		}(peer, args)
+	}
+
+	return true
+}
+
+func (rf *Raft) replicationTicker(term int) {
+	for !rf.killed() {
+		ok := rf.startReplication(term)
+		if !ok {
+			return
+		}
+
+		time.Sleep(replicationInterval)
+	}
+}
+
 func (rf *Raft) startElection(term int) {
 	votes := 0
-
-	askVoteFromPeers := func(peer int, args *RequestVoteArgs) {
-		reply := &RequestVoteReply{}
-		ok := rf.sendRequestVote(peer, args, reply)
-
-		// handle the response
-		rf.mu.Lock()
-		defer rf.mu.Unlock()
-		if !ok {
-			LOG(rf.me, rf.currentTerm, DDebug, "Ask vote from S%d, Lost or error", peer)
-			return
-		}
-
-		// align term
-		if reply.Term > rf.currentTerm {
-			rf.becomeFollowerLocked(reply.Term)
-			return
-		}
-
-		// check the context
-		if rf.contextLostLocked(Candidate, term) {
-			LOG(rf.me, rf.currentTerm, DVote, "Lost context, abort RequestVoteReply for S%d", peer)
-			return
-		}
-
-		// count vote
-		if reply.VoteGranted {
-			votes++
-			if votes > len(rf.peers)/2 {
-				rf.becomeLeaderLocked()
-				// go rf.replicationTicker(term)
-			}
-		}
-	}
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.contextLostLocked(Candidate, term) {
-		LOG(rf.me, rf.currentTerm, DVote, "Lost Candidate to %s, abort RequestVote", rf.role)
+		LOG(rf.me, rf.currentTerm, DVote, "Lost Candidate[T%d] to %s[T%d], abort RequestVote", term, rf.role, rf.currentTerm)
 		return
 	}
 
@@ -366,7 +417,40 @@ func (rf *Raft) startElection(term int) {
 			CandidateId: rf.me,
 		}
 
-		go askVoteFromPeers(peer, args)
+		// ask vote from peer
+		go func(peer int, args *RequestVoteArgs) {
+			reply := &RequestVoteReply{}
+			ok := rf.sendRequestVote(peer, args, reply)
+
+			// handle the response
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+			if !ok {
+				LOG(rf.me, rf.currentTerm, DDebug, "-> S%d, Ask vote, Lost or error", peer)
+				return
+			}
+
+			// align term
+			if reply.Term > rf.currentTerm {
+				rf.becomeFollowerLocked(reply.Term)
+				return
+			}
+
+			// check the context
+			if rf.contextLostLocked(Candidate, term) {
+				LOG(rf.me, rf.currentTerm, DVote, "-> S%d, Lost context, abort RequestVoteReply", peer)
+				return
+			}
+
+			// count vote
+			if reply.VoteGranted {
+				votes++
+				if votes > len(rf.peers)/2 {
+					rf.becomeLeaderLocked()
+					go rf.replicationTicker(term)
+				}
+			}
+		}(peer, args)
 	}
 }
 
