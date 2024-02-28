@@ -1,6 +1,9 @@
 package raft
 
-import "time"
+import (
+	"sort"
+	"time"
+)
 
 type LogEntry struct {
 	Term         int
@@ -15,6 +18,9 @@ type AppendEntriesArgs struct {
 	PrevLogIndex int
 	PrevLogTerm  int
 	Entries      []LogEntry
+
+	// leader’s commitIndex for updating follower's commitIndex
+	LeaderCommit int
 }
 
 type AppendEntriesReply struct {
@@ -61,9 +67,26 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// If leaderCommit > commitIndex,
 	// set commitIndex = min(leaderCommit, index of last new entry)
+	if args.LeaderCommit > rf.commitIndex {
+		LOG(rf.me, rf.currentTerm, DApply, "Follower update the commit index %d->%d", rf.commitIndex, args.LeaderCommit)
+		rf.commitIndex = args.LeaderCommit
+		if rf.commitIndex >= len(rf.log) {
+			rf.commitIndex = len(rf.log) - 1
+		}
+		rf.applyCond.Signal()
+	}
 
 	rf.resetElectionTimerLocked()
 	reply.Success = true
+}
+
+func (rf *Raft) getMajorMatchIndexLocked() int {
+	tmpIndex := make([]int, len(rf.matchIndex))
+	copy(tmpIndex, rf.matchIndex)
+	sort.Ints(sort.IntSlice(tmpIndex))
+	majorIdx := (len(tmpIndex) - 1) / 2
+	LOG(rf.me, rf.currentTerm, DDebug, "Match index after sort: %v, majority[%d]=%d", tmpIndex, majorIdx, tmpIndex[majorIdx])
+	return tmpIndex[majorIdx]
 }
 
 func (rf *Raft) startReplication(term int) bool {
@@ -91,6 +114,7 @@ func (rf *Raft) startReplication(term int) bool {
 			PrevLogIndex: prevIdx,
 			PrevLogTerm:  prevTerm,
 			Entries:      rf.log[prevIdx+1:],
+			LeaderCommit: rf.commitIndex,
 		}
 
 		// replicate to peer
@@ -129,6 +153,12 @@ func (rf *Raft) startReplication(term int) bool {
 			rf.nextIndex[peer] = rf.matchIndex[peer] + 1
 
 			// update commitIndex
+			majorMatchIndex := rf.getMajorMatchIndexLocked()
+			if majorMatchIndex > rf.commitIndex {
+				LOG(rf.me, rf.currentTerm, DApply, "Leader update the commit index %d->%d", rf.commitIndex, majorMatchIndex)
+				rf.commitIndex = majorMatchIndex
+				rf.applyCond.Signal()
+			}
 		}(peer, args)
 	}
 

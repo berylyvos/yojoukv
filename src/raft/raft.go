@@ -97,6 +97,17 @@ type Raft struct {
 	// for each server, index of highest log entry
 	// known to be replicated on server (initialized to 0)
 	matchIndex []int
+
+	// Volatile state on all servers:
+
+	// index of highest log entry known to be committed (global)
+	commitIndex int
+
+	// index of highest log entry applied to state machine (local)
+	lastApplied int
+
+	applyCond *sync.Cond
+	applyCh   chan ApplyMsg
 }
 
 func (rf *Raft) becomeFollowerLocked(term int) {
@@ -262,11 +273,19 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
 
+	rf.commitIndex = 0
+	rf.lastApplied = 0
+	rf.applyCh = applyCh
+	rf.applyCond = sync.NewCond(&rf.mu)
+
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
 	go rf.electionTicker()
+
+	// start log application ticker
+	go rf.applyTicker()
 
 	return rf
 }
