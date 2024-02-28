@@ -14,11 +14,23 @@ func (rf *Raft) isElectionTimeoutLocked() bool {
 	return time.Since(rf.electionStart) > rf.electionTimeout
 }
 
+func (rf *Raft) isMoreUptoDateAsCandidateLocked(candidateIndex, candidateTerm int) bool {
+	lastIndex, lastTerm := len(rf.log)-1, rf.log[len(rf.log)-1].Term
+	LOG(rf.me, rf.currentTerm, DVote, "Compare last log, Me: [%d]T%d, Candidate: [%d]T%d", lastIndex, lastTerm, candidateIndex, candidateTerm)
+
+	if lastTerm != candidateTerm {
+		return lastTerm > candidateTerm
+	}
+	return lastIndex > candidateIndex
+}
+
 // RequestVote RPC arguments structure.
 type RequestVoteArgs struct {
 	// Your data here (PartA, PartB).
-	Term        int
-	CandidateId int
+	Term         int
+	CandidateId  int
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 // RequestVote RPC reply structure.
@@ -49,6 +61,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// check if voted
 	if rf.votedFor != VotedForNone {
 		LOG(rf.me, rf.currentTerm, DVote, "-> S%d, Reject, Already voted to S%d", args.CandidateId, rf.votedFor)
+		return
+	}
+
+	// check if candidate’s log is at least as up-to-date, otherwise reject grant
+	if rf.isMoreUptoDateAsCandidateLocked(args.LastLogIndex, args.LastLogTerm) {
+		LOG(rf.me, rf.currentTerm, DVote, "-> S%d, Reject Vote, S%d's log less up-to-date", args.CandidateId)
 		return
 	}
 
@@ -100,6 +118,9 @@ func (rf *Raft) startElection(term int) {
 		return
 	}
 
+	lastIndex := len(rf.log) - 1
+	lastTerm := rf.log[lastIndex].Term
+
 	for peer := 0; peer < len(rf.peers); peer++ {
 		if peer == rf.me {
 			votes++
@@ -107,8 +128,10 @@ func (rf *Raft) startElection(term int) {
 		}
 
 		args := &RequestVoteArgs{
-			Term:        rf.currentTerm,
-			CandidateId: rf.me,
+			Term:         rf.currentTerm,
+			CandidateId:  rf.me,
+			LastLogIndex: lastIndex,
+			LastLogTerm:  lastTerm,
 		}
 
 		// ask vote from peer
