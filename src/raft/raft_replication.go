@@ -135,6 +135,12 @@ func (rf *Raft) startReplication(term int) bool {
 				return
 			}
 
+			// check the context
+			if rf.contextLostLocked(Leader, term) {
+				LOG(rf.me, rf.currentTerm, DLog, "-> S%d, Context Lost, T%d:Leader->T%d:%s", peer, term, rf.currentTerm, rf.role)
+				return
+			}
+
 			// probe the lower index if the prev log not match
 			if !reply.Success {
 				idx := rf.nextIndex[peer] - 1
