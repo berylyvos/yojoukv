@@ -32,7 +32,7 @@ const (
 	electionTimeoutMin   time.Duration = 250 * time.Millisecond
 	electionTimeoutMax   time.Duration = 400 * time.Millisecond
 	electionTimeoutRange time.Duration = 150 * time.Millisecond
-	replicationInterval  time.Duration = 200 * time.Millisecond
+	replicationInterval  time.Duration = 80 * time.Millisecond
 )
 
 const (
