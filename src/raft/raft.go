@@ -76,15 +76,27 @@ type Raft struct {
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
 
-	// Your data here (PartA, PartB, PartC).
-	// Look at the paper's Figure 2 for a description of what
-	// state a Raft server must maintain.
+	electionStart   time.Time
+	electionTimeout time.Duration // random
+
+	// Persistent state on all servers:
 	role        Role
 	currentTerm int
 	votedFor    int // -1: vote for none
 
-	electionStart   time.Time
-	electionTimeout time.Duration // random
+	// log entries; each entry contains command for state machine,
+	// and term when entry was received by leader (first index is 1)
+	log []LogEntry
+
+	// Volatile state on leaders:
+
+	// for each server, index of the next log entry
+	// to send to that server (initialized to leader last log index + 1)
+	nextIndex []int
+
+	// for each server, index of highest log entry
+	// known to be replicated on server (initialized to 0)
+	matchIndex []int
 }
 
 func (rf *Raft) becomeFollowerLocked(term int) {
@@ -245,6 +257,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.role = Follower
 	rf.currentTerm = 0
 	rf.votedFor = VotedForNone
+
+	rf.log = append(rf.log, LogEntry{})
+	rf.nextIndex = make([]int, len(rf.peers))
+	rf.matchIndex = make([]int, len(rf.peers))
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
