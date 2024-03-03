@@ -69,7 +69,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		LOG(rf.me, rf.currentTerm, DLog2, "<- S%d, Reject Log, Prev log not match, [%d]: T%d != T%d", args.LeaderId, args.PrevLogIndex, rf.log[args.PrevLogIndex].Term, args.PrevLogTerm)
 		reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
-		reply.ConflictTerm = rf.firstLogIndexOfTerm(reply.ConflictTerm)
+		reply.ConflictIndex = rf.firstLogIndexOfTerm(reply.ConflictTerm)
 		return
 	}
 
@@ -180,7 +180,8 @@ func (rf *Raft) startReplication(term int) bool {
 
 			// update commitIndex
 			majorMatchIndex := rf.getMajorMatchIndexLocked()
-			if majorMatchIndex > rf.commitIndex {
+			// leader can only commit the log in the current term!
+			if majorMatchIndex > rf.commitIndex && rf.log[majorMatchIndex].Term == rf.currentTerm {
 				LOG(rf.me, rf.currentTerm, DApply, "Leader update the commit index %d->%d", rf.commitIndex, majorMatchIndex)
 				rf.commitIndex = majorMatchIndex
 				rf.applyCond.Signal()
