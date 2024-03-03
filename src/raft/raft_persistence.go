@@ -3,6 +3,7 @@ package raft
 import (
 	"bytes"
 	"course/labgob"
+	"fmt"
 )
 
 // save Raft's persistent state to stable storage,
@@ -20,6 +21,7 @@ func (rf *Raft) persistLocked() {
 	e.Encode(rf.log)
 	raftstate := w.Bytes()
 	rf.persister.Save(raftstate, nil)
+	LOG(rf.me, rf.currentTerm, DPersist, "Persist: %v", rf.persistString())
 }
 
 // restore previously persisted state.
@@ -51,5 +53,9 @@ func (rf *Raft) readPersist(data []byte) {
 		return
 	}
 	rf.log = log
-	LOG(rf.me, rf.currentTerm, DPersist, "Read Persist %v", "")
+	LOG(rf.me, rf.currentTerm, DPersist, "Read from persist: %v", rf.persistString())
+}
+
+func (rf *Raft) persistString() string {
+	return fmt.Sprintf("T%d, VotedFor: %d, Log: [0: %d)", rf.currentTerm, rf.votedFor, len(rf.log))
 }

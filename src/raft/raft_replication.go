@@ -26,6 +26,9 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
+
+	ConflictIndex int
+	ConflictTerm  int
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -50,14 +53,23 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.becomeFollowerLocked(args.Term)
 	}
 
-	// Reply false if log doesn’t contain an entry at prevLogIndex
-	// whose term matches prevLogTerm
+	// as a follower, we must reset election timer whether we accpet the log or not
+	defer rf.resetElectionTimerLocked()
+
+	// Reply false if log doesn’t match
+	// if follower's log is too short, set XIndex = len(log)
 	if args.PrevLogIndex >= len(rf.log) {
 		LOG(rf.me, rf.currentTerm, DLog2, "<- S%d, Reject Log, Follower log too short, Len:%d <= Prev:%d", args.LeaderId, len(rf.log), args.PrevLogIndex)
+		reply.ConflictIndex = len(rf.log)
+		reply.ConflictTerm = InvalidTerm
 		return
 	}
+	// if prevLog's term doesn't match leader's
+	// set XTerm = follower's prev term
 	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		LOG(rf.me, rf.currentTerm, DLog2, "<- S%d, Reject Log, Prev log not match, [%d]: T%d != T%d", args.LeaderId, args.PrevLogIndex, rf.log[args.PrevLogIndex].Term, args.PrevLogTerm)
+		reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
+		reply.ConflictTerm = rf.firstLogIndexOfTerm(reply.ConflictTerm)
 		return
 	}
 
@@ -77,7 +89,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.applyCond.Signal()
 	}
 
-	rf.resetElectionTimerLocked()
 	reply.Success = true
 }
 
@@ -144,13 +155,21 @@ func (rf *Raft) startReplication(term int) bool {
 
 			// probe the lower index if the prev log not match
 			if !reply.Success {
-				idx := rf.nextIndex[peer] - 1
-				term := rf.log[idx].Term
-				// go back for a term
-				for idx > 0 && rf.log[idx].Term == term {
-					idx--
+				oldNext := rf.nextIndex[peer]
+				if reply.ConflictTerm == InvalidIndex {
+					rf.nextIndex[peer] = reply.ConflictIndex
+				} else {
+					leaderFirstIndex := rf.firstLogIndexOfTerm(reply.ConflictTerm)
+					if leaderFirstIndex != InvalidIndex {
+						rf.nextIndex[peer] = leaderFirstIndex + 1
+					} else {
+						rf.nextIndex[peer] = reply.ConflictIndex
+					}
 				}
-				rf.nextIndex[peer] = idx + 1
+				// avoid the out-of-order reply move the nextIndex forward
+				if rf.nextIndex[peer] > oldNext {
+					rf.nextIndex[peer] = oldNext
+				}
 				LOG(rf.me, rf.currentTerm, DLog, "Log not matched in %d, Update next=%d", args.PrevLogIndex, rf.nextIndex[peer])
 				return
 			}
