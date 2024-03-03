@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"fmt"
 	"sort"
 	"time"
 )
@@ -31,6 +32,15 @@ type AppendEntriesReply struct {
 	ConflictTerm  int
 }
 
+func (args *AppendEntriesArgs) String() string {
+	return fmt.Sprintf("Leader-%d, T%d, Prev:[%d]T%d, (%d, %d], CommitIdx: %d",
+		args.LeaderId, args.Term, args.PrevLogIndex, args.PrevLogTerm,
+		args.PrevLogIndex, args.PrevLogIndex+len(args.Entries), args.LeaderCommit)
+}
+func (reply *AppendEntriesReply) String() string {
+	return fmt.Sprintf("T%d, Sucess: %v, ConflictTerm: [%d]T%d", reply.Term, reply.Success, reply.ConflictIndex, reply.ConflictTerm)
+}
+
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
@@ -41,7 +51,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	LOG(rf.me, rf.currentTerm, DDebug, "<- S%d, Receive log, Prev=[%d]T%d, Len()=%d", args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, len(args.Entries))
+	LOG(rf.me, rf.currentTerm, DDebug, "<- S%d, Appended, Args=%v", args.LeaderId, args.String())
 	reply.Success = false
 	reply.Term = rf.currentTerm
 
@@ -54,7 +64,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// as a follower, we must reset election timer whether we accpet the log or not
-	defer rf.resetElectionTimerLocked()
+	defer func() {
+		rf.resetElectionTimerLocked()
+		if !reply.Success {
+			LOG(rf.me, rf.currentTerm, DLog2, "<- S%d, Follower Conflict: [%d]T%d", args.LeaderId, reply.ConflictIndex, reply.ConflictTerm)
+			LOG(rf.me, rf.currentTerm, DDebug, "Follower log=%v", rf.logString())
+		}
+	}()
 
 	// Reply false if log doesn’t match
 	// if follower's log is too short, set XIndex = len(log)
@@ -129,6 +145,8 @@ func (rf *Raft) startReplication(term int) bool {
 			LeaderCommit: rf.commitIndex,
 		}
 
+		LOG(rf.me, rf.currentTerm, DDebug, "-> S%d, Append, %v", peer, args.String())
+
 		// replicate to peer
 		go func(peer int, args *AppendEntriesArgs) {
 			reply := &AppendEntriesReply{}
@@ -140,6 +158,7 @@ func (rf *Raft) startReplication(term int) bool {
 				LOG(rf.me, rf.currentTerm, DLog, "-> S%d, Lost or crashed", peer)
 				return
 			}
+			LOG(rf.me, rf.currentTerm, DDebug, "-> S%d, Append, Reply=%v", peer, reply.String())
 
 			// align the term
 			if reply.Term > rf.currentTerm {
@@ -170,7 +189,8 @@ func (rf *Raft) startReplication(term int) bool {
 				if rf.nextIndex[peer] > oldNext {
 					rf.nextIndex[peer] = oldNext
 				}
-				LOG(rf.me, rf.currentTerm, DLog, "Log not matched in %d, Update next=%d", args.PrevLogIndex, rf.nextIndex[peer])
+				LOG(rf.me, rf.currentTerm, DLog, "-> S%d, Not matched at Prev=[%d]T%d, Try next Prev=[%d]T%d", peer, args.PrevLogIndex, rf.log[args.PrevLogIndex].Term, rf.nextIndex[peer]-1, rf.log[rf.nextIndex[peer]-1].Term)
+				LOG(rf.me, rf.currentTerm, DDebug, "Leader log=%v", rf.logString())
 				return
 			}
 
