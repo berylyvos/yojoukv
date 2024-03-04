@@ -20,7 +20,6 @@ package raft
 import (
 	//	"bytes"
 
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -90,7 +89,7 @@ type Raft struct {
 
 	// log entries; each entry contains command for state machine,
 	// and term when entry was received by leader (first index is 1)
-	log []LogEntry
+	log *RaftLog
 
 	// Volatile state on leaders:
 
@@ -157,42 +156,14 @@ func (rf *Raft) becomeLeaderLocked() {
 	rf.role = Leader
 
 	for peer := 0; peer < len(rf.peers); peer++ {
-		rf.nextIndex[peer] = len(rf.log)
+		rf.nextIndex[peer] = rf.log.size()
 		rf.matchIndex[peer] = 0
 	}
-}
-
-func (rf *Raft) firstLogIndexOfTerm(term int) int {
-	for idx, entry := range rf.log {
-		if entry.Term == term {
-			return idx
-		} else if entry.Term > term {
-			break
-		}
-	}
-	return InvalidIndex
-}
-
-func (rf *Raft) logString() string {
-	var terms string
-	prevTerm := rf.log[0].Term
-	prevStart := 0
-	for i := 0; i < len(rf.log); i++ {
-		if rf.log[i].Term != prevTerm {
-			terms += fmt.Sprintf(" [%d, %d]T%d;", prevStart, i-1, prevTerm)
-			prevTerm = rf.log[i].Term
-			prevStart = i
-		}
-	}
-	terms += fmt.Sprintf(" [%d, %d]T%d;", prevStart, len(rf.log)-1, prevTerm)
-
-	return terms
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
 	// Your code here (PartA).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -205,7 +176,17 @@ func (rf *Raft) GetState() (int, bool) {
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (PartD).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	LOG(rf.me, rf.currentTerm, DSnap, "Snap on %d", index)
 
+	if index <= rf.log.snapLastIdx || index > rf.commitIndex {
+		LOG(rf.me, rf.currentTerm, DSnap, "Could not snapshot out of [%d, %d]", rf.log.snapLastIdx+1, rf.commitIndex)
+		return
+	}
+
+	rf.log.doSnapshot(index, snapshot)
+	rf.persistLocked()
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -228,12 +209,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return 0, 0, false
 	}
 
-	rf.log = append(rf.log, LogEntry{
+	rf.log.append(LogEntry{
 		CommandValid: true,
 		Command:      command,
 		Term:         rf.currentTerm,
 	})
-	index := len(rf.log) - 1
+	index := rf.log.size() - 1
 	term := rf.currentTerm
 	LOG(rf.me, term, DLeader, "Leader accept log [%d]T%d", index, term)
 
@@ -287,7 +268,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 1
 	rf.votedFor = VotedForNone
 
-	rf.log = append(rf.log, LogEntry{Term: InvalidTerm})
+	rf.log = NewLog(InvalidIndex, InvalidTerm, nil, nil)
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
 

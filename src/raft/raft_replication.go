@@ -68,29 +68,29 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.resetElectionTimerLocked()
 		if !reply.Success {
 			LOG(rf.me, rf.currentTerm, DLog2, "<- S%d, Follower Conflict: [%d]T%d", args.LeaderId, reply.ConflictIndex, reply.ConflictTerm)
-			LOG(rf.me, rf.currentTerm, DDebug, "Follower log=%v", rf.logString())
+			LOG(rf.me, rf.currentTerm, DDebug, "Follower log=%v", rf.log.String())
 		}
 	}()
 
 	// Reply false if log doesn’t match
 	// if follower's log is too short, set XIndex = len(log)
-	if args.PrevLogIndex >= len(rf.log) {
-		LOG(rf.me, rf.currentTerm, DLog2, "<- S%d, Reject Log, Follower log too short, Len:%d <= Prev:%d", args.LeaderId, len(rf.log), args.PrevLogIndex)
-		reply.ConflictIndex = len(rf.log)
+	if args.PrevLogIndex >= rf.log.size() {
+		LOG(rf.me, rf.currentTerm, DLog2, "<- S%d, Reject Log, Follower log too short, Len:%d <= Prev:%d", args.LeaderId, rf.log.size(), args.PrevLogIndex)
+		reply.ConflictIndex = rf.log.size()
 		reply.ConflictTerm = InvalidTerm
 		return
 	}
 	// if prevLog's term doesn't match leader's
 	// set XTerm = follower's prev term
-	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-		LOG(rf.me, rf.currentTerm, DLog2, "<- S%d, Reject Log, Prev log not match, [%d]: T%d != T%d", args.LeaderId, args.PrevLogIndex, rf.log[args.PrevLogIndex].Term, args.PrevLogTerm)
-		reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
-		reply.ConflictIndex = rf.firstLogIndexOfTerm(reply.ConflictTerm)
+	if rf.log.at(args.PrevLogIndex).Term != args.PrevLogTerm {
+		LOG(rf.me, rf.currentTerm, DLog2, "<- S%d, Reject Log, Prev log not match, [%d]: T%d != T%d", args.LeaderId, args.PrevLogIndex, rf.log.at(args.PrevLogIndex).Term, args.PrevLogTerm)
+		reply.ConflictTerm = rf.log.at(args.PrevLogIndex).Term
+		reply.ConflictIndex = rf.log.firstIndexOf(reply.ConflictTerm)
 		return
 	}
 
 	// Append any new entries not already in the log
-	rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
+	rf.log.appendFrom(args.PrevLogIndex, args.Entries)
 	rf.persistLocked()
 	LOG(rf.me, rf.currentTerm, DLog2, "Follower append logs: (%d, %d]", args.PrevLogIndex, args.PrevLogIndex+len(args.Entries))
 
@@ -99,8 +99,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.LeaderCommit > rf.commitIndex {
 		LOG(rf.me, rf.currentTerm, DApply, "Follower update the commit index %d->%d", rf.commitIndex, args.LeaderCommit)
 		rf.commitIndex = args.LeaderCommit
-		if rf.commitIndex >= len(rf.log) {
-			rf.commitIndex = len(rf.log) - 1
+		if rf.commitIndex >= rf.log.size() {
+			rf.commitIndex = rf.log.size() - 1
 		}
 		rf.applyCond.Signal()
 	}
@@ -128,20 +128,20 @@ func (rf *Raft) startReplication(term int) bool {
 
 	for peer := 0; peer < len(rf.peers); peer++ {
 		if peer == rf.me {
-			rf.matchIndex[peer] = len(rf.log) - 1
-			rf.nextIndex[peer] = len(rf.log)
+			rf.matchIndex[peer] = rf.log.size() - 1
+			rf.nextIndex[peer] = rf.log.size()
 			continue
 		}
 
 		prevIdx := rf.nextIndex[peer] - 1
-		prevTerm := rf.log[prevIdx].Term
+		prevTerm := rf.log.at(prevIdx).Term
 
 		args := &AppendEntriesArgs{
 			Term:         rf.currentTerm,
 			LeaderId:     rf.me,
 			PrevLogIndex: prevIdx,
 			PrevLogTerm:  prevTerm,
-			Entries:      rf.log[prevIdx+1:],
+			Entries:      rf.log.tail(prevIdx + 1),
 			LeaderCommit: rf.commitIndex,
 		}
 
@@ -178,7 +178,7 @@ func (rf *Raft) startReplication(term int) bool {
 				if reply.ConflictTerm == InvalidIndex {
 					rf.nextIndex[peer] = reply.ConflictIndex
 				} else {
-					leaderFirstIndex := rf.firstLogIndexOfTerm(reply.ConflictTerm)
+					leaderFirstIndex := rf.log.firstIndexOf(reply.ConflictTerm)
 					if leaderFirstIndex != InvalidIndex {
 						rf.nextIndex[peer] = leaderFirstIndex + 1
 					} else {
@@ -189,8 +189,8 @@ func (rf *Raft) startReplication(term int) bool {
 				if rf.nextIndex[peer] > oldNext {
 					rf.nextIndex[peer] = oldNext
 				}
-				LOG(rf.me, rf.currentTerm, DLog, "-> S%d, Not matched at Prev=[%d]T%d, Try next Prev=[%d]T%d", peer, args.PrevLogIndex, rf.log[args.PrevLogIndex].Term, rf.nextIndex[peer]-1, rf.log[rf.nextIndex[peer]-1].Term)
-				LOG(rf.me, rf.currentTerm, DDebug, "Leader log=%v", rf.logString())
+				LOG(rf.me, rf.currentTerm, DLog, "-> S%d, Not matched at Prev=[%d]T%d, Try next Prev=[%d]T%d", peer, args.PrevLogIndex, rf.log.at(args.PrevLogIndex).Term, rf.nextIndex[peer]-1, rf.log.at(rf.nextIndex[peer]-1).Term)
+				LOG(rf.me, rf.currentTerm, DDebug, "Leader log=%v", rf.log.String())
 				return
 			}
 
@@ -201,7 +201,7 @@ func (rf *Raft) startReplication(term int) bool {
 			// update commitIndex
 			majorMatchIndex := rf.getMajorMatchIndexLocked()
 			// leader can only commit the log in the current term!
-			if majorMatchIndex > rf.commitIndex && rf.log[majorMatchIndex].Term == rf.currentTerm {
+			if majorMatchIndex > rf.commitIndex && rf.log.at(majorMatchIndex).Term == rf.currentTerm {
 				LOG(rf.me, rf.currentTerm, DApply, "Leader update the commit index %d->%d", rf.commitIndex, majorMatchIndex)
 				rf.commitIndex = majorMatchIndex
 				rf.applyCond.Signal()

@@ -6,10 +6,10 @@ func (rf *Raft) applyTicker() {
 		// wait for commitIndex to update, and lock released
 		rf.applyCond.Wait()
 
-		nextApplyIdx := rf.lastApplied + 1
+		idx := rf.lastApplied + 1
 		entries := make([]LogEntry, 0)
-		for i := nextApplyIdx; i <= rf.commitIndex; i++ {
-			entries = append(entries, rf.log[i])
+		for i := idx; i <= rf.commitIndex; i++ {
+			entries = append(entries, rf.log.at(i))
 		}
 		rf.mu.Unlock()
 
@@ -17,7 +17,7 @@ func (rf *Raft) applyTicker() {
 			rf.applyCh <- ApplyMsg{
 				CommandValid: entry.CommandValid,
 				Command:      entry.Command,
-				CommandIndex: nextApplyIdx + i,
+				CommandIndex: idx + i,
 			}
 		}
 

@@ -16,7 +16,7 @@ func (rf *Raft) isElectionTimeoutLocked() bool {
 }
 
 func (rf *Raft) isMoreUptoDateAsCandidateLocked(candidateIndex, candidateTerm int) bool {
-	lastIndex, lastTerm := len(rf.log)-1, rf.log[len(rf.log)-1].Term
+	lastIndex, lastTerm := rf.log.last()
 	LOG(rf.me, rf.currentTerm, DVote, "Compare last log, Me: [%d]T%d, Candidate: [%d]T%d", lastIndex, lastTerm, candidateIndex, candidateTerm)
 
 	if lastTerm != candidateTerm {
@@ -128,8 +128,7 @@ func (rf *Raft) startElection(term int) {
 		return
 	}
 
-	lastIndex := len(rf.log) - 1
-	lastTerm := rf.log[lastIndex].Term
+	lastIndex, lastTerm := rf.log.last()
 
 	for peer := 0; peer < len(rf.peers); peer++ {
 		if peer == rf.me {
