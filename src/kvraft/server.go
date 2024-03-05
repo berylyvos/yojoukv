@@ -4,25 +4,10 @@ import (
 	"course/labgob"
 	"course/labrpc"
 	"course/raft"
-	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 )
-
-const Debug = false
-
-func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug {
-		log.Printf(format, a...)
-	}
-	return
-}
-
-type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
-}
 
 type KVServer struct {
 	mu      sync.Mutex
@@ -33,15 +18,62 @@ type KVServer struct {
 
 	maxraftstate int // snapshot if log grows this big
 
-	// Your definitions here.
+	lastApplied  int
+	stateMachine *InMemSM
+	notifyChans  map[int]chan *OpReply
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
+	index, _, isLeader := kv.rf.Start(Op{Key: args.Key, Type: OpGet})
+
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	kv.mu.Lock()
+	ch := kv.getNotifyChan(index)
+	kv.mu.Unlock()
+
+	select {
+	case res := <-ch:
+		reply.Value = res.Value
+		reply.Err = res.Err
+	case <-time.After(ClientRequestTimeout):
+		reply.Err = ErrTimeout
+	}
+
+	go func() {
+		kv.mu.Lock()
+		kv.removeNotifyChan(index)
+		kv.mu.Unlock()
+	}()
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
+	index, _, isLeader := kv.rf.Start(Op{Key: args.Key, Value: args.Value, Type: getOpType(args.Op)})
+
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	kv.mu.Lock()
+	ch := kv.getNotifyChan(index)
+	kv.mu.Unlock()
+
+	select {
+	case res := <-ch:
+		reply.Err = res.Err
+	case <-time.After(ClientRequestTimeout):
+		reply.Err = ErrTimeout
+	}
+
+	go func() {
+		kv.mu.Lock()
+		kv.removeNotifyChan(index)
+		kv.mu.Unlock()
+	}()
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -84,12 +116,64 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.me = me
 	kv.maxraftstate = maxraftstate
 
-	// You may need initialization code here.
-
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
-	// You may need initialization code here.
+	kv.dead = 0
+	kv.lastApplied = 0
+	kv.stateMachine = NewInMemSM()
 
+	go kv.applyTask()
 	return kv
+}
+
+func (kv *KVServer) applyTask() {
+	for !kv.killed() {
+		select {
+		case msg := <-kv.applyCh:
+			if msg.CommandValid {
+				kv.mu.Lock()
+				if msg.CommandIndex <= kv.lastApplied {
+					kv.mu.Unlock()
+					continue
+				}
+				kv.lastApplied = msg.CommandIndex
+
+				op := msg.Command.(Op)
+				opReply := kv.applyToStateMachine(op)
+
+				if _, isLeader := kv.rf.GetState(); isLeader {
+					ch := kv.getNotifyChan(msg.CommandIndex)
+					ch <- opReply
+				}
+
+				kv.mu.Unlock()
+			}
+		}
+	}
+}
+
+func (kv *KVServer) applyToStateMachine(op Op) *OpReply {
+	var value string
+	var err Err
+	switch op.Type {
+	case OpGet:
+		value, err = kv.stateMachine.Get(op.Key)
+	case OpPut:
+		err = kv.stateMachine.Put(op.Key, op.Value)
+	case OpAppend:
+		err = kv.stateMachine.Append(op.Key, op.Value)
+	}
+	return &OpReply{Value: value, Err: err}
+}
+
+func (kv *KVServer) getNotifyChan(index int) chan *OpReply {
+	if _, ok := kv.notifyChans[index]; !ok {
+		kv.notifyChans[index] = make(chan *OpReply, 1)
+	}
+	return kv.notifyChans[index]
+}
+
+func (kv *KVServer) removeNotifyChan(index int) {
+	delete(kv.notifyChans, index)
 }
