@@ -80,6 +80,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.ConflictTerm = InvalidTerm
 		return
 	}
+	// if prevLog is truncated
+	if args.PrevLogIndex < rf.log.snapLastIdx {
+		reply.ConflictIndex = rf.log.snapLastIdx
+		reply.ConflictTerm = rf.log.snapLastTerm
+		LOG(rf.me, rf.currentTerm, DLog2, "<- S%d, Reject log, Follower log truncated in %d", args.LeaderId, rf.log.snapLastIdx)
+		return
+	}
 	// if prevLog's term doesn't match leader's
 	// set XTerm = follower's prev term
 	if rf.log.at(args.PrevLogIndex).Term != args.PrevLogTerm {
@@ -200,7 +207,13 @@ func (rf *Raft) startReplication(term int) bool {
 				if rf.nextIndex[peer] > oldNext {
 					rf.nextIndex[peer] = oldNext
 				}
-				LOG(rf.me, rf.currentTerm, DLog, "-> S%d, Not matched at Prev=[%d]T%d, Try next Prev=[%d]T%d", peer, args.PrevLogIndex, rf.log.at(args.PrevLogIndex).Term, rf.nextIndex[peer]-1, rf.log.at(rf.nextIndex[peer]-1).Term)
+
+				nextPrevIndex := rf.nextIndex[peer] - 1
+				nextPrevTerm := InvalidTerm
+				if nextPrevIndex >= rf.log.snapLastIdx {
+					nextPrevTerm = rf.log.at(nextPrevIndex).Term
+				}
+				LOG(rf.me, rf.currentTerm, DLog, "-> S%d, Not matched at Prev=[%d]T%d, Try next Prev=[%d]T%d", peer, args.PrevLogIndex, args.PrevLogTerm, nextPrevIndex, nextPrevTerm)
 				LOG(rf.me, rf.currentTerm, DDebug, "Leader log=%v", rf.log.String())
 				return
 			}

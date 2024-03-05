@@ -72,6 +72,9 @@ func (rl *RaftLog) appendFrom(prevIdx int, entries []LogEntry) {
 
 // do checkpoint from the application layer
 func (rl *RaftLog) doSnapshot(index int, snapshot []byte) {
+	if index <= rl.snapLastIdx {
+		return
+	}
 	idx := rl.idx(index)
 
 	rl.snapLastTerm = rl.tailLog[idx].Term
