@@ -70,6 +70,7 @@ func (rl *RaftLog) appendFrom(prevIdx int, entries []LogEntry) {
 	rl.tailLog = append(rl.tailLog[:rl.idx(prevIdx)+1], entries...)
 }
 
+// do checkpoint from the application layer
 func (rl *RaftLog) doSnapshot(index int, snapshot []byte) {
 	idx := rl.idx(index)
 
@@ -80,6 +81,17 @@ func (rl *RaftLog) doSnapshot(index int, snapshot []byte) {
 	newTailLog := make([]LogEntry, 0, rl.size()-rl.snapLastIdx)
 	newTailLog = append(newTailLog, LogEntry{Term: rl.snapLastTerm})
 	newTailLog = append(newTailLog, rl.tailLog[idx+1:]...)
+	rl.tailLog = newTailLog
+}
+
+// follower installs snapshot from leader
+func (rl *RaftLog) installSnapshot(index, term int, snapshot []byte) {
+	rl.snapLastIdx = index
+	rl.snapLastTerm = term
+	rl.snapshot = snapshot
+
+	newTailLog := make([]LogEntry, 0, 1)
+	newTailLog = append(newTailLog, LogEntry{Term: rl.snapLastTerm})
 	rl.tailLog = newTailLog
 }
 
