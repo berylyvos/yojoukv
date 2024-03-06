@@ -21,6 +21,7 @@ type KVServer struct {
 	lastApplied  int
 	stateMachine *InMemSM
 	notifyChans  map[int]chan *OpReply
+	dupTable     map[int64]LastOpInfo
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -50,8 +51,28 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}()
 }
 
+func (kv *KVServer) isDupRequest(clientId, seqId int64) bool {
+	lastOpInfo, ok := kv.dupTable[clientId]
+	return ok && lastOpInfo.SeqId >= seqId
+}
+
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	index, _, isLeader := kv.rf.Start(Op{Key: args.Key, Value: args.Value, Type: getOpType(args.Op)})
+	kv.mu.Lock()
+	if kv.isDupRequest(args.ClinetId, args.SeqId) {
+		opReply := kv.dupTable[args.ClinetId].Reply
+		reply.Err = opReply.Err
+		kv.mu.Unlock()
+		return
+	}
+	kv.mu.Unlock()
+
+	index, _, isLeader := kv.rf.Start(Op{
+		Key:      args.Key,
+		Value:    args.Value,
+		Type:     getOpType(args.Op),
+		ClinetId: args.ClinetId,
+		SeqId:    args.SeqId,
+	})
 
 	if !isLeader {
 		reply.Err = ErrWrongLeader
@@ -122,6 +143,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.dead = 0
 	kv.lastApplied = 0
 	kv.stateMachine = NewInMemSM()
+	kv.notifyChans = make(map[int]chan *OpReply)
+	kv.dupTable = make(map[int64]LastOpInfo)
 
 	go kv.applyTask()
 	return kv
@@ -140,7 +163,18 @@ func (kv *KVServer) applyTask() {
 				kv.lastApplied = msg.CommandIndex
 
 				op := msg.Command.(Op)
-				opReply := kv.applyToStateMachine(op)
+				var opReply *OpReply
+				if op.Type != OpGet && kv.isDupRequest(op.ClinetId, op.SeqId) {
+					opReply = kv.dupTable[op.ClinetId].Reply
+				} else {
+					opReply = kv.applyToStateMachine(op)
+					if op.Type != OpGet {
+						kv.dupTable[op.ClinetId] = LastOpInfo{
+							SeqId: op.SeqId,
+							Reply: opReply,
+						}
+					}
+				}
 
 				if _, isLeader := kv.rf.GetState(); isLeader {
 					ch := kv.getNotifyChan(msg.CommandIndex)

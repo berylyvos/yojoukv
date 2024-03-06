@@ -21,12 +21,11 @@ type Err string
 
 // Put or Append
 type PutAppendArgs struct {
-	Key   string
-	Value string
-	Op    string // "Put" or "Append"
-	// You'll have to add definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+	Key      string
+	Value    string
+	Op       string // "Put" or "Append"
+	ClinetId int64
+	SeqId    int64
 }
 
 type PutAppendReply struct {
@@ -53,9 +52,11 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 }
 
 type Op struct {
-	Key   string
-	Value string
-	Type  OpType
+	Key      string
+	Value    string
+	Type     OpType
+	ClinetId int64
+	SeqId    int64
 }
 
 type OpReply struct {
@@ -80,4 +81,9 @@ func getOpType(v string) OpType {
 	default:
 		panic(fmt.Sprintf("unknown operation type %s", v))
 	}
+}
+
+type LastOpInfo struct {
+	SeqId int64
+	Reply *OpReply
 }
