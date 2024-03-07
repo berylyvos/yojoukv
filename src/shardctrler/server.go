@@ -17,7 +17,7 @@ type ShardCtrler struct {
 
 	dead         int32
 	lastApplied  int
-	stateMachine int
+	stateMachine *CtrlerSM
 	notifyChans  map[int]chan *OpReply
 	dupTable     map[int64]LastOpInfo
 
@@ -156,7 +156,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 
 	sc.dead = 0
 	sc.lastApplied = 0
-	sc.stateMachine = 0
+	sc.stateMachine = NewCtrlerSM()
 	sc.notifyChans = make(map[int]chan *OpReply)
 	sc.dupTable = make(map[int64]LastOpInfo)
 
@@ -202,7 +202,19 @@ func (sc *ShardCtrler) applyTask() {
 }
 
 func (sc *ShardCtrler) applyToStateMachine(op Op) *OpReply {
-	return nil
+	var err Err
+	var cfg Config
+	switch op.Type {
+	case OpQuery:
+		cfg, err = sc.stateMachine.Query(op.Num)
+	case OpJoin:
+		err = sc.stateMachine.Join(op.Servers)
+	case OpLeave:
+		err = sc.stateMachine.Leave(op.GIDs)
+	case OpMove:
+		err = sc.stateMachine.Move(op.Shard, op.GID)
+	}
+	return &OpReply{Config: cfg, Err: err}
 }
 
 func (sc *ShardCtrler) isDupRequest(clientId, seqId int64) bool {
