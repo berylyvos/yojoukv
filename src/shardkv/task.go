@@ -13,18 +13,23 @@ func (kv *ShardKV) applyTask() {
 			}
 			kv.lastApplied = msg.CommandIndex
 
-			op := msg.Command.(Op)
 			var opReply *OpReply
-			if op.Type != OpGet && kv.dupRequest(op.ClientId, op.SeqId) {
-				opReply = kv.dupTable[op.ClientId].Reply
-			} else {
-				opReply = kv.applyToStateMachine(op)
-				if op.Type != OpGet {
-					kv.dupTable[op.ClientId] = LastOpInfo{
-						SeqId: op.SeqId,
-						Reply: opReply,
+			cmd := msg.Command.(RaftCommand)
+			if cmd.Type == ClientOp {
+				op := cmd.Data.(Op)
+				if op.Type != OpGet && kv.dupRequest(op.ClientId, op.SeqId) {
+					opReply = kv.dupTable[op.ClientId].Reply
+				} else {
+					opReply = kv.applyToStateMachine(op, key2shard(op.Key))
+					if op.Type != OpGet {
+						kv.dupTable[op.ClientId] = LastOpInfo{
+							SeqId: op.SeqId,
+							Reply: opReply,
+						}
 					}
 				}
+			} else if cmd.Type == ConfigChange {
+				opReply = kv.handleConfigChange(cmd)
 			}
 
 			if _, isLeader := kv.rf.GetState(); isLeader {
@@ -49,8 +54,13 @@ func (kv *ShardKV) applyTask() {
 func (kv *ShardKV) fetchConfigTask() {
 	for !kv.killed() {
 		kv.mu.Lock()
-		kv.currConfig = kv.mck.Query(-1)
+		newConfig := kv.mck.Query(kv.currConfig.Num + 1)
 		kv.mu.Unlock()
+
+		kv.ConfigCmd(RaftCommand{
+			Type: ConfigChange,
+			Data: newConfig,
+		}, &OpReply{})
 
 		time.Sleep(FetchConfigInterval)
 	}
