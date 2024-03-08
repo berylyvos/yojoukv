@@ -1,5 +1,11 @@
 package shardkv
 
+import (
+	"fmt"
+	"log"
+	"time"
+)
+
 //
 // Sharded key/value server.
 // Lots of replica groups, each running Raft.
@@ -14,19 +20,18 @@ const (
 	ErrNoKey       = "ErrNoKey"
 	ErrWrongGroup  = "ErrWrongGroup"
 	ErrWrongLeader = "ErrWrongLeader"
+	ErrTimeout     = "ErrTimeout"
 )
 
 type Err string
 
 // Put or Append
 type PutAppendArgs struct {
-	// You'll have to add definitions here.
-	Key   string
-	Value string
-	Op    string // "Put" or "Append"
-	// You'll have to add definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+	Key      string
+	Value    string
+	Op       string // "Put" or "Append"
+	ClientId int64
+	SeqId    int64
 }
 
 type PutAppendReply struct {
@@ -35,10 +40,60 @@ type PutAppendReply struct {
 
 type GetArgs struct {
 	Key string
-	// You'll have to add definitions here.
 }
 
 type GetReply struct {
 	Err   Err
 	Value string
+}
+
+const (
+	ClientRequestTimeout = 500 * time.Millisecond
+	FetchConfigInterval  = 100 * time.Millisecond
+)
+
+const Debug = false
+
+func DPrintf(format string, a ...interface{}) (n int, err error) {
+	if Debug {
+		log.Printf(format, a...)
+	}
+	return
+}
+
+type Op struct {
+	Key      string
+	Value    string
+	Type     OpType
+	ClientId int64
+	SeqId    int64
+}
+
+type OpReply struct {
+	Value string
+	Err   Err
+}
+
+type OpType uint8
+
+const (
+	OpGet OpType = iota
+	OpPut
+	OpAppend
+)
+
+func getOpType(v string) OpType {
+	switch v {
+	case "Put":
+		return OpPut
+	case "Append":
+		return OpAppend
+	default:
+		panic(fmt.Sprintf("unknown operation type %s", v))
+	}
+}
+
+type LastOpInfo struct {
+	SeqId int64
+	Reply *OpReply
 }

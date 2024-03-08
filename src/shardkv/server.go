@@ -1,15 +1,15 @@
 package shardkv
 
-import "course/labrpc"
-import "course/raft"
-import "sync"
-import "course/labgob"
-
-type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
-}
+import (
+	"bytes"
+	"course/labgob"
+	"course/labrpc"
+	"course/raft"
+	"course/shardctrler"
+	"sync"
+	"sync/atomic"
+	"time"
+)
 
 type ShardKV struct {
 	mu           sync.Mutex
@@ -21,15 +21,101 @@ type ShardKV struct {
 	ctrlers      []*labrpc.ClientEnd
 	maxraftstate int // snapshot if log grows this big
 
-	// Your definitions here.
+	dead         int32
+	lastApplied  int
+	stateMachine *InMemSM
+	notifyChans  map[int]chan *OpReply
+	dupTable     map[int64]LastOpInfo
+	currConfig   shardctrler.Config
+	mck          *shardctrler.Clerk
 }
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
+	kv.mu.Lock()
+	if !kv.matchGroup(args.Key) {
+		reply.Err = ErrWrongGroup
+		kv.mu.Unlock()
+		return
+	}
+	kv.mu.Unlock()
+
+	index, _, isLeader := kv.rf.Start(Op{Key: args.Key, Type: OpGet})
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	kv.mu.Lock()
+	ch := kv.getNotifyChannel(index)
+	kv.mu.Unlock()
+
+	select {
+	case res := <-ch:
+		reply.Err = res.Err
+		reply.Value = res.Value
+	case <-time.After(ClientRequestTimeout):
+		reply.Err = ErrTimeout
+	}
+
+	go func() {
+		kv.mu.Lock()
+		kv.removeNotifyChannel(index)
+		kv.mu.Unlock()
+	}()
 }
 
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
+	kv.mu.Lock()
+	if !kv.matchGroup(args.Key) {
+		reply.Err = ErrWrongGroup
+		kv.mu.Unlock()
+		return
+	}
+	if kv.dupRequest(args.ClientId, args.SeqId) {
+		opReply := kv.dupTable[args.ClientId].Reply
+		reply.Err = opReply.Err
+		kv.mu.Unlock()
+		return
+	}
+	kv.mu.Unlock()
+
+	index, _, isLeader := kv.rf.Start(Op{
+		Key:      args.Key,
+		Value:    args.Value,
+		Type:     getOpType(args.Op),
+		ClientId: args.ClientId,
+		SeqId:    args.SeqId,
+	})
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	kv.mu.Lock()
+	ch := kv.getNotifyChannel(index)
+	kv.mu.Unlock()
+
+	select {
+	case res := <-ch:
+		reply.Err = res.Err
+	case <-time.After(ClientRequestTimeout):
+		reply.Err = ErrTimeout
+	}
+
+	go func() {
+		kv.mu.Lock()
+		kv.removeNotifyChannel(index)
+		kv.mu.Unlock()
+	}()
+}
+
+func (kv *ShardKV) matchGroup(key string) bool {
+	return kv.currConfig.Shards[key2shard(key)] == kv.gid
+}
+
+func (kv *ShardKV) dupRequest(clientId, seqId int64) bool {
+	info, ok := kv.dupTable[clientId]
+	return ok && seqId <= info.SeqId
 }
 
 // the tester calls Kill() when a ShardKV instance won't
@@ -37,8 +123,13 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 // in Kill(), but it might be convenient to (for example)
 // turn off debug output from this instance.
 func (kv *ShardKV) Kill() {
+	atomic.StoreInt32(&kv.dead, 1)
 	kv.rf.Kill()
-	// Your code here, if desired.
+}
+
+func (kv *ShardKV) killed() bool {
+	z := atomic.LoadInt32(&kv.dead)
+	return z == 1
 }
 
 // servers[] contains the ports of the servers in this group.
@@ -79,13 +170,69 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.gid = gid
 	kv.ctrlers = ctrlers
 
-	// Your initialization code here.
-
-	// Use something like this to talk to the shardctrler:
-	// kv.mck = shardctrler.MakeClerk(kv.ctrlers)
-
+	kv.dead = 0
+	kv.lastApplied = 0
+	kv.stateMachine = NewInMemSM()
+	kv.notifyChans = make(map[int]chan *OpReply)
+	kv.dupTable = make(map[int64]LastOpInfo)
+	kv.currConfig = shardctrler.DefaultConfig()
+	kv.mck = shardctrler.MakeClerk(kv.ctrlers)
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
+	kv.restoreFromSnapshot(persister.ReadSnapshot())
+
+	go kv.applyTask()
+	go kv.fetchConfigTask()
 	return kv
+}
+
+func (kv *ShardKV) applyToStateMachine(op Op) *OpReply {
+	var value string
+	var err Err
+	switch op.Type {
+	case OpGet:
+		value, err = kv.stateMachine.Get(op.Key)
+	case OpPut:
+		err = kv.stateMachine.Put(op.Key, op.Value)
+	case OpAppend:
+		err = kv.stateMachine.Append(op.Key, op.Value)
+	}
+	return &OpReply{Value: value, Err: err}
+}
+
+func (kv *ShardKV) getNotifyChannel(index int) chan *OpReply {
+	if _, ok := kv.notifyChans[index]; !ok {
+		kv.notifyChans[index] = make(chan *OpReply, 1)
+	}
+	return kv.notifyChans[index]
+}
+
+func (kv *ShardKV) removeNotifyChannel(index int) {
+	delete(kv.notifyChans, index)
+}
+
+func (kv *ShardKV) makeSnapshot(index int) {
+	buf := new(bytes.Buffer)
+	enc := labgob.NewEncoder(buf)
+	_ = enc.Encode(kv.stateMachine)
+	_ = enc.Encode(kv.dupTable)
+	kv.rf.Snapshot(index, buf.Bytes())
+}
+
+func (kv *ShardKV) restoreFromSnapshot(snapshot []byte) {
+	if len(snapshot) == 0 {
+		return
+	}
+
+	buf := bytes.NewBuffer(snapshot)
+	dec := labgob.NewDecoder(buf)
+	var stateMachine InMemSM
+	var dupTable map[int64]LastOpInfo
+	if dec.Decode(&stateMachine) != nil || dec.Decode(&dupTable) != nil {
+		panic("failed to restore state from snapshpt")
+	}
+
+	kv.stateMachine = &stateMachine
+	kv.dupTable = dupTable
 }
