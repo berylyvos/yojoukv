@@ -31,22 +31,6 @@ func (kv *ShardKV) ConfigCmd(cmd RaftCommand, reply *OpReply) {
 	}()
 }
 
-func (kv *ShardKV) handleConfigChange(cmd RaftCommand) *OpReply {
-	switch cmd.Type {
-	case ConfigChange:
-		newConfig := cmd.Data.(shardctrler.Config)
-		return kv.applyNewConfig(newConfig)
-	case ShardMigrate:
-		shardData := cmd.Data.(ShardOpReply)
-		return kv.applyShardMigration(&shardData)
-	case ShardGC:
-		shardMeta := cmd.Data.(ShardOpArgs)
-		return kv.applyShardGC(&shardMeta)
-	default:
-		panic("unknown config change type")
-	}
-}
-
 func (kv *ShardKV) applyNewConfig(newConfig shardctrler.Config) *OpReply {
 	if kv.currConfig.Num+1 == newConfig.Num {
 		for i := 0; i < shardctrler.NShards; i++ {

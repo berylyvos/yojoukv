@@ -1,6 +1,7 @@
 package shardkv
 
 import (
+	"course/shardctrler"
 	"sync"
 	"time"
 )
@@ -18,21 +19,21 @@ func (kv *ShardKV) applyTask() {
 
 			var opReply *OpReply
 			cmd := msg.Command.(RaftCommand)
-			if cmd.Type == ClientOp {
+			switch cmd.Type {
+			case ClientOp:
 				op := cmd.Data.(Op)
-				if op.Type != OpGet && kv.dupRequest(op.ClientId, op.SeqId) {
-					opReply = kv.dupTable[op.ClientId].Reply
-				} else {
-					opReply = kv.applyToStateMachine(op, key2shard(op.Key))
-					if op.Type != OpGet {
-						kv.dupTable[op.ClientId] = LastOpInfo{
-							SeqId: op.SeqId,
-							Reply: opReply,
-						}
-					}
-				}
-			} else { // config change or shard migrate/GC
-				opReply = kv.handleConfigChange(cmd)
+				opReply = kv.applyClientOperation(op)
+			case ConfigChange:
+				newConfig := cmd.Data.(shardctrler.Config)
+				opReply = kv.applyNewConfig(newConfig)
+			case ShardMigrate:
+				shardData := cmd.Data.(ShardOpReply)
+				opReply = kv.applyShardMigration(&shardData)
+			case ShardGC:
+				shardMeta := cmd.Data.(ShardOpArgs)
+				opReply = kv.applyShardGC(&shardMeta)
+			default:
+				panic("unknown config change type")
 			}
 
 			if _, isLeader := kv.rf.GetState(); isLeader {
@@ -52,6 +53,22 @@ func (kv *ShardKV) applyTask() {
 			kv.mu.Unlock()
 		}
 	}
+}
+
+func (kv *ShardKV) applyClientOperation(op Op) *OpReply {
+	if kv.matchGroup(op.Key) {
+		var opReply *OpReply
+		if op.Type != OpGet && kv.dupRequest(op.ClientId, op.SeqId) {
+			opReply = kv.dupTable[op.ClientId].Reply
+		} else {
+			opReply = kv.applyToStateMachine(op, key2shard(op.Key))
+			if op.Type != OpGet {
+				kv.dupTable[op.ClientId] = LastOpInfo{op.SeqId, opReply}
+			}
+		}
+		return opReply
+	}
+	return &OpReply{Err: ErrWrongGroup}
 }
 
 func (kv *ShardKV) fetchConfigTask() {
