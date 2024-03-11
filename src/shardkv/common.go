@@ -22,6 +22,7 @@ const (
 	ErrWrongLeader = "ErrWrongLeader"
 	ErrTimeout     = "ErrTimeout"
 	ErrWrongConfig = "ErrWrongConfig"
+	ErrNotReady    = "ErrNotReady"
 )
 
 type Err string
@@ -51,6 +52,7 @@ type GetReply struct {
 const (
 	ClientRequestTimeout = 500 * time.Millisecond
 	FetchConfigInterval  = 100 * time.Millisecond
+	ShardMigrateInterval = 50 * time.Millisecond
 )
 
 const Debug = false
@@ -99,14 +101,46 @@ type LastOpInfo struct {
 	Reply *OpReply
 }
 
+func (op *LastOpInfo) copy() LastOpInfo {
+	return LastOpInfo{
+		SeqId: op.SeqId,
+		Reply: &OpReply{
+			Err:   op.Reply.Err,
+			Value: op.Reply.Value,
+		},
+	}
+}
+
 type RaftCommandType uint8
 
 const (
 	ClientOp RaftCommandType = iota
 	ConfigChange
+	ShardMigrate
 )
 
 type RaftCommand struct {
 	Type RaftCommandType
 	Data interface{}
+}
+
+type ShardStatus uint8
+
+const (
+	ShardNormal ShardStatus = iota
+	ShardMoveIn
+	ShardMoveOut
+	ShardGC
+)
+
+type ShardOpArgs struct {
+	ConfigNum int
+	ShardIds  []int
+}
+
+type ShardOpReply struct {
+	Err       Err
+	ConfigNum int
+	ShardData map[int]map[string]string
+	DupTable  map[int64]LastOpInfo
 }

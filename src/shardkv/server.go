@@ -27,6 +27,7 @@ type ShardKV struct {
 	notifyChans map[int]chan *OpReply
 	dupTable    map[int64]LastOpInfo
 	currConfig  shardctrler.Config
+	prevConfig  shardctrler.Config
 	mck         *shardctrler.Clerk
 }
 
@@ -182,6 +183,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.notifyChans = make(map[int]chan *OpReply)
 	kv.dupTable = make(map[int64]LastOpInfo)
 	kv.currConfig = shardctrler.DefaultConfig()
+	kv.prevConfig = shardctrler.DefaultConfig()
 	kv.mck = shardctrler.MakeClerk(kv.ctrlers)
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
@@ -190,6 +192,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 
 	go kv.applyTask()
 	go kv.fetchConfigTask()
+	go kv.shardMigrateTask()
 	return kv
 }
 
