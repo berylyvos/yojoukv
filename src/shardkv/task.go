@@ -74,11 +74,23 @@ func (kv *ShardKV) applyClientOperation(op Op) *OpReply {
 func (kv *ShardKV) fetchConfigTask() {
 	for !kv.killed() {
 		if _, isLeader := kv.rf.GetState(); isLeader {
+			needFetch := true
 			kv.mu.Lock()
-			newConfig := kv.mck.Query(kv.currConfig.Num + 1)
+			for _, shard := range kv.shards {
+				if shard.Status != ShardNormal {
+					needFetch = false
+					break
+				}
+			}
+			newConfigNum := kv.currConfig.Num + 1
 			kv.mu.Unlock()
 
-			kv.ConfigCmd(RaftCommand{ConfigChange, newConfig}, &OpReply{})
+			if needFetch {
+				newConfig := kv.mck.Query(newConfigNum)
+				if newConfig.Num == newConfigNum {
+					kv.ConfigCmd(RaftCommand{ConfigChange, newConfig}, &OpReply{})
+				}
+			}
 		}
 		time.Sleep(FetchConfigInterval)
 	}
@@ -119,11 +131,8 @@ func (kv *ShardKV) shardGCTask() {
 		if _, isLeader := kv.rf.GetState(); isLeader {
 			kv.mu.Lock()
 			gidShardIds := kv.getShardIdsByStatus(ShardHangOn)
-			var wg sync.WaitGroup
 			for gid, shardIds := range gidShardIds {
-				wg.Add(1)
 				go func(servers []string, shardIds []int, configNum int) {
-					defer wg.Done()
 					deleteShardArgs := ShardOpArgs{configNum, shardIds}
 					for _, server := range servers {
 						var deleteShardReply ShardOpReply
@@ -136,7 +145,6 @@ func (kv *ShardKV) shardGCTask() {
 				}(kv.prevConfig.Groups[gid], shardIds, kv.currConfig.Num)
 			}
 			kv.mu.Unlock()
-			wg.Wait()
 		}
 		time.Sleep(ShardGCInterval)
 	}

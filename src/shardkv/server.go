@@ -117,7 +117,10 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 }
 
 func (kv *ShardKV) matchGroup(key string) bool {
-	return kv.currConfig.Shards[key2shard(key)] == kv.gid
+	shard := key2shard(key)
+	shardStatus := kv.shards[shard].Status
+	return kv.currConfig.Shards[shard] == kv.gid &&
+		(shardStatus == ShardNormal || shardStatus == ShardHangOn)
 }
 
 func (kv *ShardKV) dupRequest(clientId, seqId int64) bool {
@@ -169,6 +172,10 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
+	labgob.Register(RaftCommand{})
+	labgob.Register(shardctrler.Config{})
+	labgob.Register(ShardOpArgs{})
+	labgob.Register(ShardOpReply{})
 
 	kv := new(ShardKV)
 	kv.me = me
@@ -227,11 +234,18 @@ func (kv *ShardKV) makeSnapshot(index int) {
 	enc := labgob.NewEncoder(buf)
 	_ = enc.Encode(kv.shards)
 	_ = enc.Encode(kv.dupTable)
+	_ = enc.Encode(kv.currConfig)
+	_ = enc.Encode(kv.prevConfig)
 	kv.rf.Snapshot(index, buf.Bytes())
 }
 
 func (kv *ShardKV) restoreFromSnapshot(snapshot []byte) {
 	if len(snapshot) == 0 {
+		for i := 0; i < shardctrler.NShards; i++ {
+			if _, ok := kv.shards[i]; !ok {
+				kv.shards[i] = NewInMemSM()
+			}
+		}
 		return
 	}
 
@@ -239,10 +253,15 @@ func (kv *ShardKV) restoreFromSnapshot(snapshot []byte) {
 	dec := labgob.NewDecoder(buf)
 	var stateMachine map[int]*InMemSM
 	var dupTable map[int64]LastOpInfo
-	if dec.Decode(&stateMachine) != nil || dec.Decode(&dupTable) != nil {
+	var currConfig shardctrler.Config
+	var prevConfig shardctrler.Config
+	if dec.Decode(&stateMachine) != nil || dec.Decode(&dupTable) != nil ||
+		dec.Decode(&currConfig) != nil || dec.Decode(&prevConfig) != nil {
 		panic("failed to restore state from snapshpt")
 	}
 
 	kv.shards = stateMachine
 	kv.dupTable = dupTable
+	kv.currConfig = currConfig
+	kv.prevConfig = prevConfig
 }
