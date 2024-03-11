@@ -39,6 +39,9 @@ func (kv *ShardKV) handleConfigChange(cmd RaftCommand) *OpReply {
 	case ShardMigrate:
 		shardData := cmd.Data.(ShardOpReply)
 		return kv.applyShardMigration(&shardData)
+	case ShardGC:
+		shardMeta := cmd.Data.(ShardOpArgs)
+		return kv.applyShardGC(&shardMeta)
 	default:
 		panic("unknown config change type")
 	}
@@ -77,7 +80,7 @@ func (kv *ShardKV) applyShardMigration(shardOpReply *ShardOpReply) *OpReply {
 			shard := kv.shards[shardId]
 			if shard.Status == ShardMoveIn {
 				shard.copyFrom(shardData)
-				shard.Status = ShardGC
+				shard.Status = ShardHangOn
 			} else {
 				break
 			}
@@ -91,4 +94,20 @@ func (kv *ShardKV) applyShardMigration(shardOpReply *ShardOpReply) *OpReply {
 		}
 	}
 	return &OpReply{Err: ErrWrongConfig}
+}
+
+func (kv *ShardKV) applyShardGC(shardMeta *ShardOpArgs) *OpReply {
+	if shardMeta.ConfigNum == kv.currConfig.Num {
+		for _, shardId := range shardMeta.ShardIds {
+			shard := kv.shards[shardId]
+			if shard.Status == ShardHangOn {
+				shard.Status = ShardNormal
+			} else if shard.Status == ShardMoveOut {
+				kv.shards[shardId] = NewInMemSM()
+			} else {
+				break
+			}
+		}
+	}
+	return &OpReply{Err: OK}
 }

@@ -31,7 +31,7 @@ func (kv *ShardKV) applyTask() {
 						}
 					}
 				}
-			} else { // config change or shard migrate
+			} else { // config change or shard migrate/GC
 				opReply = kv.handleConfigChange(cmd)
 			}
 
@@ -72,10 +72,7 @@ func (kv *ShardKV) shardMigrateTask() {
 		if _, isLeader := kv.rf.GetState(); isLeader {
 			kv.mu.Lock()
 			gidShardIds := kv.getShardIdsByStatus(ShardMoveIn)
-			if len(gidShardIds) == 0 {
-				kv.mu.Unlock()
-				continue
-			}
+
 			var wg sync.WaitGroup
 			for gid, shardIds := range gidShardIds {
 				wg.Add(1)
@@ -85,7 +82,7 @@ func (kv *ShardKV) shardMigrateTask() {
 					for _, server := range servers {
 						var fetchShardReply ShardOpReply
 						clientEnd := kv.make_end(server)
-						ok := clientEnd.Call("ShardKV.HandleShardMigrate", &fetchShardArgs, &fetchShardReply)
+						ok := clientEnd.Call("ShardKV.FetchShardData", &fetchShardArgs, &fetchShardReply)
 						if ok && fetchShardReply.Err == OK {
 							kv.ConfigCmd(RaftCommand{ShardMigrate, fetchShardReply}, &OpReply{})
 						}
@@ -97,6 +94,34 @@ func (kv *ShardKV) shardMigrateTask() {
 			wg.Wait()
 		}
 		time.Sleep(ShardMigrateInterval)
+	}
+}
+
+func (kv *ShardKV) shardGCTask() {
+	for !kv.killed() {
+		if _, isLeader := kv.rf.GetState(); isLeader {
+			kv.mu.Lock()
+			gidShardIds := kv.getShardIdsByStatus(ShardHangOn)
+			var wg sync.WaitGroup
+			for gid, shardIds := range gidShardIds {
+				wg.Add(1)
+				go func(servers []string, shardIds []int, configNum int) {
+					defer wg.Done()
+					deleteShardArgs := ShardOpArgs{configNum, shardIds}
+					for _, server := range servers {
+						var deleteShardReply ShardOpReply
+						clientEnd := kv.make_end(server)
+						ok := clientEnd.Call("ShardKV.DeleteShardData", &deleteShardArgs, &deleteShardReply)
+						if ok && deleteShardReply.Err == OK {
+							kv.ConfigCmd(RaftCommand{ShardGC, deleteShardArgs}, &OpReply{})
+						}
+					}
+				}(kv.prevConfig.Groups[gid], shardIds, kv.currConfig.Num)
+			}
+			kv.mu.Unlock()
+			wg.Wait()
+		}
+		time.Sleep(ShardGCInterval)
 	}
 }
 
@@ -115,7 +140,7 @@ func (kv *ShardKV) getShardIdsByStatus(status ShardStatus) map[int][]int {
 	return gidShardIds
 }
 
-func (kv *ShardKV) HandleShardMigrate(args *ShardOpArgs, reply *ShardOpReply) {
+func (kv *ShardKV) FetchShardData(args *ShardOpArgs, reply *ShardOpReply) {
 	if _, isLeader := kv.rf.GetState(); !isLeader {
 		reply.Err = ErrWrongLeader
 		return
@@ -141,4 +166,24 @@ func (kv *ShardKV) HandleShardMigrate(args *ShardOpArgs, reply *ShardOpReply) {
 
 	reply.Err = OK
 	reply.ConfigNum = args.ConfigNum
+}
+
+func (kv *ShardKV) DeleteShardData(args *ShardOpArgs, reply *ShardOpReply) {
+	if _, isLeader := kv.rf.GetState(); !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	kv.mu.Lock()
+	if kv.currConfig.Num > args.ConfigNum {
+		reply.Err = OK
+		kv.mu.Unlock()
+		return
+	}
+	kv.mu.Unlock()
+
+	var opReply OpReply
+	kv.ConfigCmd(RaftCommand{ShardGC, *args}, &opReply)
+
+	reply.Err = opReply.Err
 }
